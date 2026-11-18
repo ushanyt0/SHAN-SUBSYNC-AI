@@ -1,6 +1,14 @@
 package com.shancodex.subsync
 
 import android.os.Bundle
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import android.provider.MediaStore
+import androidx.core.content.ContextCompat
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import android.content.Context
 import android.app.Activity
 import android.content.pm.ActivityInfo
@@ -66,6 +74,8 @@ private val Context.playbackStore by preferencesDataStore(name = "subsync_playba
 class MainActivity : ComponentActivity() {
     private val selectedVideo = mutableStateOf<Uri?>(null)
     private lateinit var videoPicker: androidx.activity.result.ActivityResultLauncher<Array<String>>
+    private val showBrowser = mutableStateOf(false)
+    private lateinit var videoPermission: androidx.activity.result.ActivityResultLauncher<String>
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -77,12 +87,21 @@ class MainActivity : ComponentActivity() {
                 selectedVideo.value = it
             }
         }
+        videoPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (granted) showBrowser.value = true
+        }
         setContent {
-            SubSyncHome(
-                videoUri = selectedVideo.value,
-                onSelectVideo = { videoPicker.launch(arrayOf("video/*")) },
-                onClosePlayer = { selectedVideo.value = null }
-            )
+            if (selectedVideo.value != null) {
+                SubSyncHome(videoUri = selectedVideo.value, onSelectVideo = {}, onClosePlayer = { selectedVideo.value = null })
+            } else if (showBrowser.value) {
+                VideoBrowserScreen(onChooseVideo = { selectedVideo.value = it; showBrowser.value = false }, onBack = { showBrowser.value = false })
+            } else {
+                SubSyncHome(videoUri = null, onSelectVideo = {
+                    val permission = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_VIDEO else Manifest.permission.READ_EXTERNAL_STORAGE
+                    if (ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED) showBrowser.value = true
+                    else videoPermission.launch(permission)
+                }, onClosePlayer = { selectedVideo.value = null })
+            }
         }
     }
 }
@@ -308,6 +327,7 @@ private fun SubSyncPlayerScreen(videoUri: Uri, onBack: () -> Unit) {
     var isFullscreen by remember(videoUri) { mutableStateOf(false) }
     var playbackError by remember(videoUri) { mutableStateOf<String?>(null) }
     var useVlcFallback by remember(videoUri) { mutableStateOf(false) }
+    var selectedAspect by remember(videoUri) { mutableStateOf("Auto") }
     val activity = context as? Activity
     val oldOrientation = remember(activity) { activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED }
     DisposableEffect(isFullscreen) {
@@ -351,7 +371,7 @@ private fun SubSyncPlayerScreen(videoUri: Uri, onBack: () -> Unit) {
     ) {
         if (isFullscreen) {
             if (useVlcFallback) {
-                VlcFallbackPlayer(videoUri, player.currentPosition, progressKey, Modifier.fillMaxSize())
+                VlcFallbackPlayer(videoUri, player.currentPosition, progressKey, Modifier.fillMaxSize(), selectedAspect, true, { isFullscreen = false })
             } else {
                 AndroidView(
                     modifier = Modifier.fillMaxSize(),
@@ -360,7 +380,7 @@ private fun SubSyncPlayerScreen(videoUri: Uri, onBack: () -> Unit) {
                         useController = true
                         setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
                     } },
-                    update = { it.player = player }
+                    update = { it.player = player; it.resizeMode = aspectResizeMode(selectedAspect) }
                 )
             }
             TextButton(
@@ -379,7 +399,7 @@ private fun SubSyncPlayerScreen(videoUri: Uri, onBack: () -> Unit) {
                 }
                 Spacer(Modifier.height(12.dp))
                 if (useVlcFallback) {
-                    VlcFallbackPlayer(videoUri, player.currentPosition, progressKey, Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(20.dp)))
+                    VlcFallbackPlayer(videoUri, player.currentPosition, progressKey, Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(20.dp)), selectedAspect)
                 } else {
                     AndroidView(
                         modifier = Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(20.dp)),
@@ -400,7 +420,13 @@ private fun SubSyncPlayerScreen(videoUri: Uri, onBack: () -> Unit) {
                         Text("This file may use a codec not supported by the phone's current decoder.", color = Muted, fontSize = 10.sp)
                     }
                 }
-                Spacer(Modifier.height(14.dp))
+                Spacer(Modifier.height(10.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    listOf("Auto", "16:9", "9:16", "4:3", "Fit", "Fill").forEach { ratio ->
+                        FilterChip(selected = selectedAspect == ratio, onClick = { selectedAspect = ratio }, label = { Text(ratio, fontSize = 9.sp) })
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
                 GlassPanel(modifier = Modifier.fillMaxWidth(), borderColor = Cyan.copy(alpha = 0.25f)) {
                     Text("RESUME PLAYBACK", color = Cyan, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
                     Spacer(Modifier.height(6.dp))
@@ -422,7 +448,10 @@ private fun VlcFallbackPlayer(
     videoUri: Uri,
     startPosition: Long,
     progressKey: androidx.datastore.preferences.core.Preferences.Key<Long>,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    aspectMode: String = "Auto",
+    fullscreen: Boolean = false,
+    onExitFullscreen: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val libVlc = remember { LibVLC(context, arrayListOf("--no-drop-late-frames", "--no-skip-frames", "--avcodec-hw=none")) }
@@ -466,6 +495,14 @@ private fun VlcFallbackPlayer(
         }
     }
 
+    LaunchedEffect(vlcPlayer, aspectMode) {
+        when (aspectMode) {
+            "16:9", "9:16", "4:3" -> { vlcPlayer.setAspectRatio(aspectMode); vlcPlayer.setScale(0f) }
+            "Fill" -> { vlcPlayer.setAspectRatio(null); vlcPlayer.setScale(1.15f) }
+            else -> { vlcPlayer.setAspectRatio(null); vlcPlayer.setScale(0f) }
+        }
+    }
+
     LaunchedEffect(vlcPlayer, ready) {
         while (ready) {
             currentPosition = vlcPlayer.time.coerceAtLeast(0L)
@@ -479,37 +516,96 @@ private fun VlcFallbackPlayer(
         }
     }
 
-    Column(modifier = modifier.background(Color.Black), verticalArrangement = Arrangement.Center) {
-        vlcError?.let { error ->
-            Text(error, color = Color(0xFFFF8A8A), modifier = Modifier.fillMaxWidth().padding(12.dp), fontSize = 12.sp)
-        }
-        AndroidView(
-            modifier = Modifier.fillMaxWidth().weight(1f),
-            factory = { videoLayout },
-            update = { }
-        )
-        Column(Modifier.fillMaxWidth().background(Color(0xFF101010)).padding(horizontal = 14.dp, vertical = 8.dp)) {
-            Slider(
-                value = if (duration > 0L) currentPosition.coerceIn(0L, duration).toFloat() else 0f,
-                onValueChange = { currentPosition = it.toLong() },
-                onValueChangeFinished = { if (duration > 0L) vlcPlayer.time = currentPosition },
-                valueRange = 0f..(duration.coerceAtLeast(1L).toFloat()),
-                colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White)
-            )
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceEvenly, modifier = Modifier.fillMaxWidth()) {
-                TextButton(onClick = { vlcPlayer.time = (vlcPlayer.time - 10_000L).coerceAtLeast(0L) }) { Text("−10s", color = Color.White) }
-                TextButton(onClick = { if (vlcPlayer.isPlaying) vlcPlayer.pause() else vlcPlayer.play() }) {
-                    Text(if (isPlaying) "Ⅱ  PAUSE" else "▶  PLAY", color = Color.White, fontWeight = FontWeight.Bold)
-                }
-                TextButton(onClick = { vlcPlayer.time = (vlcPlayer.time + 10_000L).coerceAtMost(duration) }) { Text("+10s", color = Color.White) }
+    Box(modifier = modifier.background(Color.Black)) {
+        AndroidView(modifier = Modifier.fillMaxSize(), factory = { videoLayout }, update = { })
+        if (fullscreen) {
+            TextButton(onClick = onExitFullscreen, modifier = Modifier.align(Alignment.TopEnd).padding(16.dp)) {
+                Text("EXIT FULLSCREEN  ×", color = Color.White, fontWeight = FontWeight.Bold)
             }
-            Text(
-                "VLC COMPATIBILITY MODE  •  " + formatTime(currentPosition) + " / " + formatTime(duration),
-                color = Color(0xFFB8C2D8), fontSize = 10.sp, textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth()
-            )
+        } else {
+            Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Color(0xEE101010)).padding(horizontal = 14.dp, vertical = 8.dp)) {
+                vlcError?.let { Text(it, color = Color(0xFFFF8A8A), fontSize = 11.sp) }
+                Slider(value = if (duration > 0L) currentPosition.coerceIn(0L, duration).toFloat() else 0f,
+                    onValueChange = { currentPosition = it.toLong() },
+                    onValueChangeFinished = { if (duration > 0L) vlcPlayer.time = currentPosition },
+                    valueRange = 0f..duration.coerceAtLeast(1L).toFloat(),
+                    colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceEvenly, modifier = Modifier.fillMaxWidth()) {
+                    TextButton(onClick = { vlcPlayer.time = (vlcPlayer.time - 10_000L).coerceAtLeast(0L) }) { Text("−10s", color = Color.White) }
+                    TextButton(onClick = { if (vlcPlayer.isPlaying) vlcPlayer.pause() else vlcPlayer.play() }) { Text(if (isPlaying) "Ⅱ  PAUSE" else "▶  PLAY", color = Color.White, fontWeight = FontWeight.Bold) }
+                    TextButton(onClick = { vlcPlayer.time = (vlcPlayer.time + 10_000L).coerceAtMost(duration) }) { Text("+10s", color = Color.White) }
+                }
+                Text("VLC COMPATIBILITY MODE  •  " + formatTime(currentPosition) + " / " + formatTime(duration), color = Color(0xFFB8C2D8), fontSize = 10.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+            }
         }
     }
+}
+
+@Composable
+private fun VideoBrowserScreen(onChooseVideo: (Uri) -> Unit, onBack: () -> Unit) {
+    val context = LocalContext.current
+    var videos by remember { mutableStateOf<List<VideoEntry>>(emptyList()) }
+    var folder by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) { videos = queryVideos(context) }
+    val visible = videos.filter { folder == null || it.folder == folder }
+    Column(Modifier.fillMaxSize().background(Color(0xFF080B13)).statusBarsPadding().navigationBarsPadding().padding(16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = { if (folder != null) folder = null else onBack() }) { Text("‹ BACK", color = Cyan) }
+            Text(if (folder == null) "VIDEO LIBRARY" else folder!!, color = Color.White, fontWeight = FontWeight.Bold)
+        }
+        if (folder == null) {
+            val folders = videos.map { it.folder }.distinct().sorted()
+            LazyColumn {
+                item { Text("FOLDERS", color = Cyan, fontSize = 10.sp) }
+                items(folders) { name ->
+                    TextButton(onClick = { folder = name }, modifier = Modifier.fillMaxWidth()) { Text("▣  $name  ·  ${videos.count { it.folder == name }} videos", color = Color.White) }
+                }
+                item { Text("ALL VIDEOS", color = Cyan, fontSize = 10.sp) }
+                items(videos) { video ->
+                    TextButton(onClick = { onChooseVideo(video.uri) }, modifier = Modifier.fillMaxWidth()) {
+                        Column(Modifier.fillMaxWidth()) { Text(video.name, color = Color.White, maxLines = 2); Text(video.folder + " · " + formatTime(video.duration), color = Muted, fontSize = 10.sp) }
+                    }
+                }
+            }
+        } else {
+            LazyColumn {
+                items(visible) { video ->
+                    TextButton(onClick = { onChooseVideo(video.uri) }, modifier = Modifier.fillMaxWidth()) {
+                        Column(Modifier.fillMaxWidth()) { Text(video.name, color = Color.White, maxLines = 2); Text(formatTime(video.duration), color = Muted, fontSize = 10.sp) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private data class VideoEntry(val uri: Uri, val name: String, val folder: String, val duration: Long)
+
+private fun queryVideos(context: Context): List<VideoEntry> {
+    val result = mutableListOf<VideoEntry>()
+    val collection = MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+    val projection = arrayOf(MediaStore.Video.Media._ID, MediaStore.Video.Media.DISPLAY_NAME, MediaStore.Video.Media.RELATIVE_PATH, MediaStore.Video.Media.DURATION)
+    context.contentResolver.query(collection, projection, null, null, MediaStore.Video.Media.DATE_ADDED + " DESC")?.use { cursor ->
+        val idCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media._ID)
+        val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DISPLAY_NAME)
+        val pathCol = cursor.getColumnIndex(MediaStore.Video.Media.RELATIVE_PATH)
+        val durationCol = cursor.getColumnIndex(MediaStore.Video.Media.DURATION)
+        while (cursor.moveToNext()) {
+            val id = cursor.getLong(idCol)
+            val name = cursor.getString(nameCol) ?: "Video"
+            val path = if (pathCol >= 0) cursor.getString(pathCol).orEmpty() else "Videos/"
+            val folderName = path.trimEnd('/').substringAfterLast('/').ifBlank { "Internal storage" }
+            val duration = if (durationCol >= 0) cursor.getLong(durationCol) else 0L
+            result.add(VideoEntry(Uri.withAppendedPath(collection, id.toString()), name, folderName, duration))
+        }
+    }
+    return result
+}
+
+private fun aspectResizeMode(mode: String): Int = when (mode) {
+    "Fill" -> androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+    "16:9", "9:16", "4:3" -> androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FILL
+    else -> androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
 }
 
 private fun formatTime(milliseconds: Long): String {
