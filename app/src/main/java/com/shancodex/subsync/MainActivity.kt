@@ -427,6 +427,10 @@ private fun SubSyncPlayerScreen(videoUri: Uri, onBack: () -> Unit) {
                     } },
                     update = { it.player = player; it.resizeMode = aspectResizeMode(selectedAspect) }
                 )
+                TextButton(
+                    onClick = { isFullscreen = false },
+                    modifier = Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(8.dp)
+                ) { Text("EXIT FULLSCREEN  ×", color = Color.White, fontWeight = FontWeight.Bold) }
             }
         } else {
             Column(
