@@ -25,6 +25,14 @@ android {
         jvmTarget = "17"
     }
 
+    buildTypes {
+        release {
+            // Testing-only signing: creates an installable APK without a private release keystore.
+            signingConfig = signingConfigs.getByName("debug")
+            isMinifyEnabled = false
+        }
+    }
+
     buildFeatures { compose = true }
 }
 
