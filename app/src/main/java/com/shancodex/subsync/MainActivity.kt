@@ -425,30 +425,43 @@ private fun VlcFallbackPlayer(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val libVlc = remember { LibVLC(context, arrayListOf("--no-drop-late-frames", "--no-skip-frames")) }
+    val libVlc = remember { LibVLC(context, arrayListOf("--no-drop-late-frames", "--no-skip-frames", "--avcodec-hw=none")) }
     val vlcPlayer = remember { VLCMediaPlayer(libVlc) }
     val videoLayout = remember { VLCVideoLayout(context) }
     var isPlaying by remember { mutableStateOf(true) }
     var currentPosition by remember { mutableStateOf(startPosition) }
     var duration by remember { mutableStateOf(0L) }
     var ready by remember { mutableStateOf(false) }
+    var vlcError by remember { mutableStateOf<String?>(null) }
 
-    DisposableEffect(vlcPlayer, videoLayout) {
-        vlcPlayer.attachViews(videoLayout, null, false, false)
-        val media = Media(libVlc, videoUri)
-        vlcPlayer.media = media
-        media.release()
-        vlcPlayer.play()
-        if (startPosition > 0L) {
-            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                vlcPlayer.time = startPosition
-            }, 1200)
+    DisposableEffect(vlcPlayer, videoLayout, videoUri) {
+        var openedDescriptor: android.os.ParcelFileDescriptor? = null
+        try {
+            // SAF content:// URIs are not always readable by LibVLC as direct URI paths.
+            // Pass the already-authorized file descriptor instead and keep it open during playback.
+            openedDescriptor = context.contentResolver.openFileDescriptor(videoUri, "r")
+                ?: throw IllegalStateException("Android could not open the selected video file.")
+            vlcPlayer.attachViews(videoLayout, null, false, false)
+            val media = Media(libVlc, openedDescriptor.fileDescriptor)
+            media.setHWDecoderEnabled(false, false)
+            vlcPlayer.media = media
+            media.release()
+            vlcPlayer.play()
+            if (startPosition > 0L) {
+                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                    if (!vlcPlayer.isReleased) vlcPlayer.time = startPosition
+                }, 1500)
+            }
+            ready = true
+        } catch (error: Exception) {
+            vlcError = "VLC could not open this video: " + (error.message ?: error.javaClass.simpleName)
         }
-        ready = true
         onDispose {
-            vlcPlayer.stop()
-            vlcPlayer.detachViews()
-            vlcPlayer.release()
+            ready = false
+            try { vlcPlayer.stop() } catch (_: Exception) { }
+            try { vlcPlayer.detachViews() } catch (_: Exception) { }
+            try { vlcPlayer.release() } catch (_: Exception) { }
+            try { openedDescriptor?.close() } catch (_: Exception) { }
             libVlc.release()
         }
     }
@@ -467,6 +480,9 @@ private fun VlcFallbackPlayer(
     }
 
     Column(modifier = modifier.background(Color.Black), verticalArrangement = Arrangement.Center) {
+        vlcError?.let { error ->
+            Text(error, color = Color(0xFFFF8A8A), modifier = Modifier.fillMaxWidth().padding(12.dp), fontSize = 12.sp)
+        }
         AndroidView(
             modifier = Modifier.fillMaxWidth().weight(1f),
             factory = { videoLayout },
