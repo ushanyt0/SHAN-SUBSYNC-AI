@@ -51,6 +51,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -72,6 +74,7 @@ private val Muted = Color(0xFFAAB6CC)
 private val Context.playbackStore by preferencesDataStore(name = "subsync_playback")
 
 class MainActivity : ComponentActivity() {
+    private val showSplash = mutableStateOf(true)
     private val selectedVideo = mutableStateOf<Uri?>(null)
     private lateinit var videoPicker: androidx.activity.result.ActivityResultLauncher<Array<String>>
     private val showBrowser = mutableStateOf(false)
@@ -91,7 +94,9 @@ class MainActivity : ComponentActivity() {
             if (granted) showBrowser.value = true
         }
         setContent {
-            if (selectedVideo.value != null) {
+            if (showSplash.value) {
+                SubSyncSplash(onFinished = { showSplash.value = false })
+            } else if (selectedVideo.value != null) {
                 SubSyncHome(videoUri = selectedVideo.value, onSelectVideo = {}, onClosePlayer = { selectedVideo.value = null })
             } else if (showBrowser.value) {
                 VideoBrowserScreen(onChooseVideo = { selectedVideo.value = it; showBrowser.value = false }, onBack = { showBrowser.value = false })
@@ -102,6 +107,46 @@ class MainActivity : ComponentActivity() {
                     else videoPermission.launch(permission)
                 }, onClosePlayer = { selectedVideo.value = null })
             }
+        }
+    }
+}
+
+@Composable
+private fun SubSyncSplash(onFinished: () -> Unit) {
+    val transition = rememberInfiniteTransition(label = "splash-pulse")
+    val pulse by transition.animateFloat(
+        initialValue = 0.45f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(850), RepeatMode.Reverse),
+        label = "splash-glow"
+    )
+    LaunchedEffect(Unit) {
+        delay(1900)
+        onFinished()
+    }
+    Box(
+        Modifier.fillMaxSize().background(
+            Brush.linearGradient(listOf(Color(0xFF11182B), Color(0xFF080B13), Color(0xFF17102B)))
+        ),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(
+                Modifier.size(92.dp).clip(RoundedCornerShape(28.dp))
+                    .background(Brush.linearGradient(listOf(Cyan.copy(alpha = pulse), Violet.copy(alpha = 0.75f))))
+                    .border(1.dp, Color.White.copy(alpha = 0.35f), RoundedCornerShape(28.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("S", color = Color(0xFF08111D), fontSize = 58.sp, fontWeight = FontWeight.Black)
+            }
+            Spacer(Modifier.height(24.dp))
+            Text("SHAN SUBSYNC AI", color = Color.White, fontSize = 23.sp, fontWeight = FontWeight.Black, letterSpacing = 1.sp)
+            Spacer(Modifier.height(7.dp))
+            Text("EVERY LINE. EVERY MOMENT. IN SYNC.", color = Muted, fontSize = 9.sp, letterSpacing = 1.5.sp)
+            Spacer(Modifier.height(28.dp))
+            SyncWaveform(pulse = pulse)
+            Spacer(Modifier.height(32.dp))
+            Text("POWERED BY SHAN CODEX", color = Color(0xFF77839B), fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
         }
     }
 }
@@ -383,10 +428,6 @@ private fun SubSyncPlayerScreen(videoUri: Uri, onBack: () -> Unit) {
                     update = { it.player = player; it.resizeMode = aspectResizeMode(selectedAspect) }
                 )
             }
-            TextButton(
-                onClick = { isFullscreen = false },
-                modifier = Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(8.dp)
-            ) { Text("EXIT FULLSCREEN  ×", color = Color.White, fontWeight = FontWeight.Bold) }
         } else {
             Column(
                 modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(16.dp)
@@ -462,6 +503,14 @@ private fun VlcFallbackPlayer(
     var duration by remember { mutableStateOf(0L) }
     var ready by remember { mutableStateOf(false) }
     var vlcError by remember { mutableStateOf<String?>(null) }
+    var controlsVisible by remember(fullscreen) { mutableStateOf(true) }
+
+    LaunchedEffect(fullscreen, controlsVisible) {
+        if (fullscreen && controlsVisible) {
+            delay(3_000)
+            controlsVisible = false
+        }
+    }
 
     DisposableEffect(vlcPlayer, videoLayout, videoUri) {
         var openedDescriptor: android.os.ParcelFileDescriptor? = null
@@ -516,26 +565,53 @@ private fun VlcFallbackPlayer(
         }
     }
 
-    Box(modifier = modifier.background(Color.Black)) {
+    Box(
+        modifier = modifier.background(Color.Black).pointerInput(fullscreen) {
+            detectTapGestures(onTap = { if (fullscreen) controlsVisible = true })
+        }
+    ) {
         AndroidView(modifier = Modifier.fillMaxSize(), factory = { videoLayout }, update = { })
-        if (fullscreen) {
-            TextButton(onClick = onExitFullscreen, modifier = Modifier.align(Alignment.TopEnd).padding(16.dp)) {
-                Text("EXIT FULLSCREEN  ×", color = Color.White, fontWeight = FontWeight.Bold)
-            }
-        } else {
-            Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Color(0xEE101010)).padding(horizontal = 14.dp, vertical = 8.dp)) {
+        if (!fullscreen || controlsVisible) {
+            Column(
+                Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                    .background(if (fullscreen) Color(0xCC080B13) else Color(0xEE101010))
+                    .padding(horizontal = 14.dp, vertical = if (fullscreen) 10.dp else 8.dp)
+            ) {
+                if (fullscreen) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        TextButton(onClick = onExitFullscreen) {
+                            Text("EXIT FULLSCREEN  ×", color = Color.White, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
                 vlcError?.let { Text(it, color = Color(0xFFFF8A8A), fontSize = 11.sp) }
-                Slider(value = if (duration > 0L) currentPosition.coerceIn(0L, duration).toFloat() else 0f,
+                Slider(
+                    value = if (duration > 0L) currentPosition.coerceIn(0L, duration).toFloat() else 0f,
                     onValueChange = { currentPosition = it.toLong() },
                     onValueChangeFinished = { if (duration > 0L) vlcPlayer.time = currentPosition },
                     valueRange = 0f..duration.coerceAtLeast(1L).toFloat(),
-                    colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White))
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceEvenly, modifier = Modifier.fillMaxWidth()) {
-                    TextButton(onClick = { vlcPlayer.time = (vlcPlayer.time - 10_000L).coerceAtLeast(0L) }) { Text("−10s", color = Color.White) }
-                    TextButton(onClick = { if (vlcPlayer.isPlaying) vlcPlayer.pause() else vlcPlayer.play() }) { Text(if (isPlaying) "Ⅱ  PAUSE" else "▶  PLAY", color = Color.White, fontWeight = FontWeight.Bold) }
-                    TextButton(onClick = { vlcPlayer.time = (vlcPlayer.time + 10_000L).coerceAtMost(duration) }) { Text("+10s", color = Color.White) }
+                    colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Cyan)
+                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    TextButton(onClick = { vlcPlayer.time = (vlcPlayer.time - 5_000L).coerceAtLeast(0L); controlsVisible = true }) {
+                        Text("−5s", color = Color.White)
+                    }
+                    TextButton(onClick = { if (vlcPlayer.isPlaying) vlcPlayer.pause() else vlcPlayer.play(); controlsVisible = true }) {
+                        Text(if (isPlaying) "Ⅱ  PAUSE" else "▶  PLAY", color = Color.White, fontWeight = FontWeight.Bold)
+                    }
+                    TextButton(onClick = { vlcPlayer.time = (vlcPlayer.time + 5_000L).coerceAtMost(duration); controlsVisible = true }) {
+                        Text("+5s", color = Color.White)
+                    }
                 }
-                Text("VLC COMPATIBILITY MODE  •  " + formatTime(currentPosition) + " / " + formatTime(duration), color = Color(0xFFB8C2D8), fontSize = 10.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+                Text(
+                    "VLC COMPATIBILITY MODE  •  " + formatTime(currentPosition) + " / " + formatTime(duration),
+                    color = Color(0xFFB8C2D8), fontSize = 10.sp, textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
         }
     }
