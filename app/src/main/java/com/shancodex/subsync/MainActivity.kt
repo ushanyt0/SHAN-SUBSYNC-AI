@@ -311,7 +311,7 @@ private fun SubSyncPlayerScreen(videoUri: Uri, onBack: () -> Unit) {
         Spacer(Modifier.height(12.dp))
         AndroidView(
             modifier = Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(20.dp)),
-            factory = { viewContext -> PlayerView(viewContext).apply { player = player; useController = true } },
+            factory = { viewContext -> PlayerView(viewContext).apply { this.player = player; useController = true } },
             update = { it.player = player }
         )
         Spacer(Modifier.height(14.dp))
