@@ -2,6 +2,9 @@ package com.shancodex.subsync
 
 import android.os.Bundle
 import android.content.Context
+import android.app.Activity
+import android.content.pm.ActivityInfo
+import android.view.View
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
@@ -298,34 +301,102 @@ private fun SubSyncPlayerScreen(videoUri: Uri, onBack: () -> Unit) {
         }
     }
 
-    Column(
+    var isFullscreen by remember(videoUri) { mutableStateOf(false) }
+    var playbackError by remember(videoUri) { mutableStateOf<String?>(null) }
+    val activity = context as? Activity
+    val oldOrientation = remember(activity) { activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED }
+    DisposableEffect(isFullscreen) {
+        val window = activity?.window
+        if (isFullscreen) {
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            window?.decorView?.systemUiVisibility = (
+                View.SYSTEM_UI_FLAG_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+            )
+        } else {
+            activity?.requestedOrientation = oldOrientation
+            window?.decorView?.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+        }
+        onDispose {
+            activity?.requestedOrientation = oldOrientation
+            window?.decorView?.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+        }
+    }
+    DisposableEffect(player) {
+        val errorListener = object : Player.Listener {
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                playbackError = error.errorCodeName + ": " + (error.message ?: "Unsupported video or audio codec")
+            }
+        }
+        player.addListener(errorListener)
+        onDispose { player.removeListener(errorListener) }
+    }
+
+    Box(
         modifier = Modifier.fillMaxSize()
             .background(Brush.linearGradient(listOf(Color(0xFF11182B), Color(0xFF080B13))))
-            .statusBarsPadding().navigationBarsPadding().padding(16.dp)
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = onBack) { Text("‹  BACK", color = Cyan, fontWeight = FontWeight.Bold) }
-            Spacer(Modifier.width(8.dp))
-            Text(title, color = Color.White, fontWeight = FontWeight.SemiBold, maxLines = 1)
-        }
-        Spacer(Modifier.height(12.dp))
-        AndroidView(
-            modifier = Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(20.dp)),
-            factory = { viewContext -> PlayerView(viewContext).apply { this.player = player; useController = true } },
-            update = { it.player = player }
-        )
-        Spacer(Modifier.height(14.dp))
-        GlassPanel(modifier = Modifier.fillMaxWidth(), borderColor = Cyan.copy(alpha = 0.25f)) {
-            Text("RESUME PLAYBACK", color = Cyan, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
-            Spacer(Modifier.height(6.dp))
-            Text(
-                if (restored) "Playback position is saved automatically on this device."
-                else "Checking your last watched position…",
-                color = Muted, fontSize = 12.sp
+        if (isFullscreen) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { viewContext -> PlayerView(viewContext).apply {
+                    this.player = player
+                    useController = true
+                    setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
+                } },
+                update = { it.player = player }
             )
+            TextButton(
+                onClick = { isFullscreen = false },
+                modifier = Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(8.dp)
+            ) { Text("EXIT FULLSCREEN  ×", color = Color.White, fontWeight = FontWeight.Bold) }
+        } else {
+            Column(
+                modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(16.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = onBack) { Text("‹  BACK", color = Cyan, fontWeight = FontWeight.Bold) }
+                    Spacer(Modifier.width(8.dp))
+                    Text(title, color = Color.White, fontWeight = FontWeight.SemiBold, maxLines = 1, modifier = Modifier.weight(1f))
+                    TextButton(onClick = { isFullscreen = true }) { Text("⛶", color = Cyan, fontSize = 22.sp) }
+                }
+                Spacer(Modifier.height(12.dp))
+                AndroidView(
+                    modifier = Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(20.dp)),
+                    factory = { viewContext -> PlayerView(viewContext).apply {
+                        this.player = player
+                        useController = true
+                        setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
+                    } },
+                    update = { it.player = player }
+                )
+                playbackError?.let { error ->
+                    Spacer(Modifier.height(8.dp))
+                    GlassPanel(modifier = Modifier.fillMaxWidth(), borderColor = Color(0xFFFF6B6B)) {
+                        Text("VIDEO PLAYBACK ERROR", color = Color(0xFFFF8A8A), fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                        Spacer(Modifier.height(5.dp))
+                        Text(error, color = Color.White, fontSize = 11.sp)
+                        Text("This file may use a codec not supported by the phone's current decoder.", color = Muted, fontSize = 10.sp)
+                    }
+                }
+                Spacer(Modifier.height(14.dp))
+                GlassPanel(modifier = Modifier.fillMaxWidth(), borderColor = Cyan.copy(alpha = 0.25f)) {
+                    Text("RESUME PLAYBACK", color = Cyan, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        if (restored) "Playback position is saved automatically on this device."
+                        else "Checking your last watched position…",
+                        color = Muted, fontSize = 12.sp
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                Text("POWERED BY SHAN CODEX", modifier = Modifier.fillMaxWidth(), color = Color(0xFF77839B), fontSize = 9.sp, textAlign = TextAlign.Center, letterSpacing = 2.sp)
+            }
         }
-        Spacer(Modifier.height(10.dp))
-        Text("POWERED BY SHAN CODEX", modifier = Modifier.fillMaxWidth(), color = Color(0xFF77839B), fontSize = 9.sp, textAlign = TextAlign.Center, letterSpacing = 2.sp)
     }
 }
 
