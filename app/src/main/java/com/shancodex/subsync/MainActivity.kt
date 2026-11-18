@@ -53,6 +53,10 @@ import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
+import org.videolan.libvlc.LibVLC
+import org.videolan.libvlc.Media
+import org.videolan.libvlc.MediaPlayer as VLCMediaPlayer
+import org.videolan.libvlc.util.VLCVideoLayout
 
 private val Cyan = Color(0xFF56E7F2)
 private val Violet = Color(0xFF9B8CFF)
@@ -303,6 +307,7 @@ private fun SubSyncPlayerScreen(videoUri: Uri, onBack: () -> Unit) {
 
     var isFullscreen by remember(videoUri) { mutableStateOf(false) }
     var playbackError by remember(videoUri) { mutableStateOf<String?>(null) }
+    var useVlcFallback by remember(videoUri) { mutableStateOf(false) }
     val activity = context as? Activity
     val oldOrientation = remember(activity) { activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED }
     DisposableEffect(isFullscreen) {
@@ -330,6 +335,10 @@ private fun SubSyncPlayerScreen(videoUri: Uri, onBack: () -> Unit) {
         val errorListener = object : Player.Listener {
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                 playbackError = error.errorCodeName + ": " + (error.message ?: "Unsupported video or audio codec")
+                if (error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FAILED || error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED) {
+                    useVlcFallback = true
+                    player.pause()
+                }
             }
         }
         player.addListener(errorListener)
@@ -341,15 +350,19 @@ private fun SubSyncPlayerScreen(videoUri: Uri, onBack: () -> Unit) {
             .background(Brush.linearGradient(listOf(Color(0xFF11182B), Color(0xFF080B13))))
     ) {
         if (isFullscreen) {
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { viewContext -> PlayerView(viewContext).apply {
-                    this.player = player
-                    useController = true
-                    setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
-                } },
-                update = { it.player = player }
-            )
+            if (useVlcFallback) {
+                VlcFallbackPlayer(videoUri, player.currentPosition, progressKey, Modifier.fillMaxSize())
+            } else {
+                AndroidView(
+                    modifier = Modifier.fillMaxSize(),
+                    factory = { viewContext -> PlayerView(viewContext).apply {
+                        this.player = player
+                        useController = true
+                        setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
+                    } },
+                    update = { it.player = player }
+                )
+            }
             TextButton(
                 onClick = { isFullscreen = false },
                 modifier = Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(8.dp)
@@ -365,16 +378,20 @@ private fun SubSyncPlayerScreen(videoUri: Uri, onBack: () -> Unit) {
                     TextButton(onClick = { isFullscreen = true }) { Text("⛶", color = Cyan, fontSize = 22.sp) }
                 }
                 Spacer(Modifier.height(12.dp))
-                AndroidView(
-                    modifier = Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(20.dp)),
-                    factory = { viewContext -> PlayerView(viewContext).apply {
-                        this.player = player
-                        useController = true
-                        setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
-                    } },
-                    update = { it.player = player }
-                )
-                playbackError?.let { error ->
+                if (useVlcFallback) {
+                    VlcFallbackPlayer(videoUri, player.currentPosition, progressKey, Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(20.dp)))
+                } else {
+                    AndroidView(
+                        modifier = Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(20.dp)),
+                        factory = { viewContext -> PlayerView(viewContext).apply {
+                            this.player = player
+                            useController = true
+                            setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
+                        } },
+                        update = { it.player = player }
+                    )
+                }
+                if (!useVlcFallback) playbackError?.let { error ->
                     Spacer(Modifier.height(8.dp))
                     GlassPanel(modifier = Modifier.fillMaxWidth(), borderColor = Color(0xFFFF6B6B)) {
                         Text("VIDEO PLAYBACK ERROR", color = Color(0xFFFF8A8A), fontWeight = FontWeight.Bold, fontSize = 11.sp)
@@ -398,6 +415,94 @@ private fun SubSyncPlayerScreen(videoUri: Uri, onBack: () -> Unit) {
             }
         }
     }
+}
+
+@Composable
+private fun VlcFallbackPlayer(
+    videoUri: Uri,
+    startPosition: Long,
+    progressKey: androidx.datastore.preferences.core.Preferences.Key<Long>,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val libVlc = remember { LibVLC(context, arrayListOf("--no-drop-late-frames", "--no-skip-frames")) }
+    val vlcPlayer = remember { VLCMediaPlayer(libVlc) }
+    val videoLayout = remember { VLCVideoLayout(context) }
+    var isPlaying by remember { mutableStateOf(true) }
+    var currentPosition by remember { mutableStateOf(startPosition) }
+    var duration by remember { mutableStateOf(0L) }
+    var ready by remember { mutableStateOf(false) }
+
+    DisposableEffect(vlcPlayer, videoLayout) {
+        vlcPlayer.attachViews(videoLayout, null, false, false)
+        val media = Media(libVlc, videoUri)
+        vlcPlayer.media = media
+        media.release()
+        vlcPlayer.play()
+        if (startPosition > 0L) {
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                vlcPlayer.time = startPosition
+            }, 1200)
+        }
+        ready = true
+        onDispose {
+            vlcPlayer.stop()
+            vlcPlayer.detachViews()
+            vlcPlayer.release()
+            libVlc.release()
+        }
+    }
+
+    LaunchedEffect(vlcPlayer, ready) {
+        while (ready) {
+            currentPosition = vlcPlayer.time.coerceAtLeast(0L)
+            duration = vlcPlayer.length.coerceAtLeast(0L)
+            isPlaying = vlcPlayer.isPlaying
+            context.playbackStore.edit { prefs ->
+                val saved = if (duration > 0L && duration - currentPosition < 10_000L) 0L else currentPosition
+                prefs[progressKey] = saved
+            }
+            delay(1_000)
+        }
+    }
+
+    Column(modifier = modifier.background(Color.Black), verticalArrangement = Arrangement.Center) {
+        AndroidView(
+            modifier = Modifier.fillMaxWidth().weight(1f),
+            factory = { videoLayout },
+            update = { }
+        )
+        Column(Modifier.fillMaxWidth().background(Color(0xFF101010)).padding(horizontal = 14.dp, vertical = 8.dp)) {
+            Slider(
+                value = if (duration > 0L) currentPosition.coerceIn(0L, duration).toFloat() else 0f,
+                onValueChange = { currentPosition = it.toLong() },
+                onValueChangeFinished = { if (duration > 0L) vlcPlayer.time = currentPosition },
+                valueRange = 0f..(duration.coerceAtLeast(1L).toFloat()),
+                colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White)
+            )
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceEvenly, modifier = Modifier.fillMaxWidth()) {
+                TextButton(onClick = { vlcPlayer.time = (vlcPlayer.time - 10_000L).coerceAtLeast(0L) }) { Text("−10s", color = Color.White) }
+                TextButton(onClick = { if (vlcPlayer.isPlaying) vlcPlayer.pause() else vlcPlayer.play() }) {
+                    Text(if (isPlaying) "Ⅱ  PAUSE" else "▶  PLAY", color = Color.White, fontWeight = FontWeight.Bold)
+                }
+                TextButton(onClick = { vlcPlayer.time = (vlcPlayer.time + 10_000L).coerceAtMost(duration) }) { Text("+10s", color = Color.White) }
+            }
+            Text(
+                "VLC COMPATIBILITY MODE  •  " + formatTime(currentPosition) + " / " + formatTime(duration),
+                color = Color(0xFFB8C2D8), fontSize = 10.sp, textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+    }
+}
+
+private fun formatTime(milliseconds: Long): String {
+    val totalSeconds = (milliseconds / 1000L).coerceAtLeast(0L)
+    val hours = totalSeconds / 3600L
+    val minutes = (totalSeconds % 3600L) / 60L
+    val seconds = totalSeconds % 60L
+    return if (hours > 0L) "%d:%02d:%02d".format(hours, minutes, seconds)
+    else "%02d:%02d".format(minutes, seconds)
 }
 
 private suspend fun savePlaybackPosition(context: Context, key: androidx.datastore.preferences.core.Preferences.Key<Long>, player: ExoPlayer) {
