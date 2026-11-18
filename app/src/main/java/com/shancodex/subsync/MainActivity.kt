@@ -1,7 +1,11 @@
 package com.shancodex.subsync
 
 import android.os.Bundle
+import android.content.Context
+import android.net.Uri
+import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -17,6 +21,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
@@ -28,26 +40,57 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.longPreferencesKey
+import androidx.datastore.preferences.preferencesDataStore
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
 
 private val Cyan = Color(0xFF56E7F2)
 private val Violet = Color(0xFF9B8CFF)
 private val Muted = Color(0xFFAAB6CC)
+private val Context.playbackStore by preferencesDataStore(name = "subsync_playback")
 
 class MainActivity : ComponentActivity() {
+    private val selectedVideo = mutableStateOf<Uri?>(null)
+    private lateinit var videoPicker: androidx.activity.result.ActivityResultLauncher<Array<String>>
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { SubSyncHome() }
+        videoPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            uri?.let {
+                try {
+                    contentResolver.takePersistableUriPermission(it, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                } catch (_: SecurityException) { }
+                selectedVideo.value = it
+            }
+        }
+        setContent {
+            SubSyncHome(
+                videoUri = selectedVideo.value,
+                onSelectVideo = { videoPicker.launch(arrayOf("video/*")) },
+                onClosePlayer = { selectedVideo.value = null }
+            )
+        }
     }
 }
 
 @Composable
-private fun SubSyncHome() {
+private fun SubSyncHome(videoUri: Uri?, onSelectVideo: () -> Unit, onClosePlayer: () -> Unit) {
     MaterialTheme(colorScheme = darkColorScheme(
         primary = Cyan,
         secondary = Violet,
         background = Color(0xFF080B13),
         surface = Color(0xFF151B2B)
     )) {
+        if (videoUri != null) {
+            SubSyncPlayerScreen(videoUri = videoUri, onBack = onClosePlayer)
+        } else {
         val transition = rememberInfiniteTransition(label = "subsync-glow")
         val pulse by transition.animateFloat(
             initialValue = 0.35f,
@@ -175,7 +218,7 @@ private fun SubSyncHome() {
                         )
                         Spacer(Modifier.height(18.dp))
                         Button(
-                            onClick = { },
+                            onClick = onSelectVideo,
                             modifier = Modifier.fillMaxWidth().height(51.dp),
                             shape = RoundedCornerShape(15.dp),
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB9F7FA), contentColor = Color(0xFF08151B))
@@ -209,7 +252,99 @@ private fun SubSyncHome() {
                 Text("A smarter way to keep subtitles in sync  •  v0.1.0", color = Color(0xFF59647A), fontSize = 9.sp, textAlign = TextAlign.Center)
             }
         }
+        }
     }
+}
+
+@Composable
+private fun SubSyncPlayerScreen(videoUri: Uri, onBack: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val progressKey = remember(videoUri) { longPreferencesKey("position_" + videoUri.toString().hashCode()) }
+    val title = remember(videoUri) { queryDisplayName(context, videoUri) }
+    val player = remember(videoUri) {
+        ExoPlayer.Builder(context).build().apply {
+            setMediaItem(MediaItem.fromUri(videoUri))
+            prepare()
+            playWhenReady = true
+        }
+    }
+    var restored by remember(videoUri) { mutableStateOf(false) }
+
+    LaunchedEffect(player, progressKey) {
+        val savedPosition = context.playbackStore.data.first()[progressKey] ?: 0L
+        if (savedPosition > 5_000L) player.seekTo(savedPosition)
+        restored = true
+    }
+    LaunchedEffect(player, restored) {
+        if (restored) {
+            while (true) {
+                delay(3_000)
+                savePlaybackPosition(context, progressKey, player)
+            }
+        }
+    }
+    DisposableEffect(player) {
+        val listener = object : Player.Listener {
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (!isPlaying) scope.launch { savePlaybackPosition(context, progressKey, player) }
+            }
+        }
+        player.addListener(listener)
+        onDispose {
+            player.removeListener(listener)
+            scope.launch { savePlaybackPosition(context, progressKey, player) }
+            player.release()
+        }
+    }
+
+    Column(
+        modifier = Modifier.fillMaxSize()
+            .background(Brush.linearGradient(listOf(Color(0xFF11182B), Color(0xFF080B13))))
+            .statusBarsPadding().navigationBarsPadding().padding(16.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = onBack) { Text("‹  BACK", color = Cyan, fontWeight = FontWeight.Bold) }
+            Spacer(Modifier.width(8.dp))
+            Text(title, color = Color.White, fontWeight = FontWeight.SemiBold, maxLines = 1)
+        }
+        Spacer(Modifier.height(12.dp))
+        AndroidView(
+            modifier = Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(20.dp)),
+            factory = { viewContext -> PlayerView(viewContext).apply { player = player; useController = true } },
+            update = { it.player = player }
+        )
+        Spacer(Modifier.height(14.dp))
+        GlassPanel(modifier = Modifier.fillMaxWidth(), borderColor = Cyan.copy(alpha = 0.25f)) {
+            Text("RESUME PLAYBACK", color = Cyan, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
+            Spacer(Modifier.height(6.dp))
+            Text(
+                if (restored) "Playback position is saved automatically on this device."
+                else "Checking your last watched position…",
+                color = Muted, fontSize = 12.sp
+            )
+        }
+        Spacer(Modifier.height(10.dp))
+        Text("POWERED BY SHAN CODEX", modifier = Modifier.fillMaxWidth(), color = Color(0xFF77839B), fontSize = 9.sp, textAlign = TextAlign.Center, letterSpacing = 2.sp)
+    }
+}
+
+private suspend fun savePlaybackPosition(context: Context, key: androidx.datastore.preferences.core.Preferences.Key<Long>, player: ExoPlayer) {
+    val duration = player.duration
+    val position = if (duration > 0L && duration - player.currentPosition < 10_000L) 0L
+        else player.currentPosition.coerceAtLeast(0L)
+    context.playbackStore.edit { preferences -> preferences[key] = position }
+}
+
+private fun queryDisplayName(context: Context, uri: Uri): String {
+    var name = "Selected video"
+    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+        if (cursor.moveToFirst()) {
+            val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (index >= 0) name = cursor.getString(index) ?: name
+        }
+    }
+    return name
 }
 
 @Composable
