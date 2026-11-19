@@ -16,6 +16,7 @@ import android.view.View
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.compose.animation.core.RepeatMode
@@ -377,6 +378,15 @@ private fun SubSyncPlayerScreen(videoUri: Uri, onBack: () -> Unit) {
     var playbackError by remember(videoUri) { mutableStateOf<String?>(null) }
     var useVlcFallback by remember(videoUri) { mutableStateOf(false) }
     var selectedAspect by remember(videoUri) { mutableStateOf("Auto") }
+    BackHandler {
+        if (isFullscreen) {
+            isFullscreen = false
+        } else {
+            player.pause()
+            scope.launch { savePlaybackPosition(context, progressKey, player) }
+            onBack()
+        }
+    }
     val activity = context as? Activity
     val oldOrientation = remember(activity) { activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED }
     DisposableEffect(isFullscreen) {
@@ -583,8 +593,19 @@ private fun VlcFallbackPlayer(
         AndroidView(modifier = Modifier.fillMaxSize(), factory = { videoLayout }, update = { })
         if (!fullscreen || controlsVisible) {
             Column(
-                Modifier.align(Alignment.BottomCenter).fillMaxWidth()
-                    .background(if (fullscreen) Color(0xCC080B13) else Color(0xEE101010))
+                Modifier.align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(horizontal = if (fullscreen) 18.dp else 0.dp, vertical = if (fullscreen) 14.dp else 0.dp)
+                    .clip(RoundedCornerShape(if (fullscreen) 24.dp else 0.dp))
+                    .background(
+                        if (fullscreen) Brush.verticalGradient(
+                            listOf(Color(0x553A4058), Color(0xAA111827), Color(0xBB090D18))
+                        ) else Brush.verticalGradient(listOf(Color(0xEE101010), Color(0xEE101010)))
+                    )
+                    .then(
+                        if (fullscreen) Modifier.border(1.dp, Color.White.copy(alpha = 0.22f), RoundedCornerShape(24.dp))
+                        else Modifier
+                    )
                     .padding(horizontal = 14.dp, vertical = if (fullscreen) 10.dp else 8.dp)
             ) {
                 if (fullscreen) {
