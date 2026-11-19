@@ -77,6 +77,8 @@ private val Context.playbackStore by preferencesDataStore(name = "subsync_playba
 class MainActivity : ComponentActivity() {
     private val showSplash = mutableStateOf(true)
     private val selectedVideo = mutableStateOf<Uri?>(null)
+    private val selectedSubtitle = mutableStateOf<Uri?>(null)
+    private lateinit var subtitlePicker: androidx.activity.result.ActivityResultLauncher<Array<String>>
     private lateinit var videoPicker: androidx.activity.result.ActivityResultLauncher<Array<String>>
     private val showBrowser = mutableStateOf(false)
     private lateinit var videoPermission: androidx.activity.result.ActivityResultLauncher<String>
@@ -91,6 +93,14 @@ class MainActivity : ComponentActivity() {
                 selectedVideo.value = it
             }
         }
+        subtitlePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            uri?.let {
+                try {
+                    contentResolver.takePersistableUriPermission(it, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                } catch (_: SecurityException) { }
+                selectedSubtitle.value = it
+            }
+        }
         videoPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             if (granted) showBrowser.value = true
         }
@@ -98,15 +108,15 @@ class MainActivity : ComponentActivity() {
             if (showSplash.value) {
                 SubSyncSplash(onFinished = { showSplash.value = false })
             } else if (selectedVideo.value != null) {
-                SubSyncHome(videoUri = selectedVideo.value, onSelectVideo = {}, onClosePlayer = { selectedVideo.value = null })
+                SubSyncHome(videoUri = selectedVideo.value, subtitleUri = selectedSubtitle.value, onSelectVideo = {}, onSelectSubtitle = { subtitlePicker.launch(arrayOf("application/x-subrip", "text/plain", "application/octet-stream")) }, onClosePlayer = { selectedVideo.value = null })
             } else if (showBrowser.value) {
                 VideoBrowserScreen(onChooseVideo = { selectedVideo.value = it; showBrowser.value = false }, onBack = { showBrowser.value = false })
             } else {
-                SubSyncHome(videoUri = null, onSelectVideo = {
+                SubSyncHome(videoUri = null, subtitleUri = selectedSubtitle.value, onSelectVideo = {
                     val permission = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_VIDEO else Manifest.permission.READ_EXTERNAL_STORAGE
                     if (ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED) showBrowser.value = true
                     else videoPermission.launch(permission)
-                }, onClosePlayer = { selectedVideo.value = null })
+                }, onSelectSubtitle = { subtitlePicker.launch(arrayOf("application/x-subrip", "text/plain", "application/octet-stream")) }, onClosePlayer = { selectedVideo.value = null })
             }
         }
     }
@@ -153,7 +163,7 @@ private fun SubSyncSplash(onFinished: () -> Unit) {
 }
 
 @Composable
-private fun SubSyncHome(videoUri: Uri?, onSelectVideo: () -> Unit, onClosePlayer: () -> Unit) {
+private fun SubSyncHome(videoUri: Uri?, subtitleUri: Uri?, onSelectVideo: () -> Unit, onSelectSubtitle: () -> Unit, onClosePlayer: () -> Unit) {
     MaterialTheme(colorScheme = darkColorScheme(
         primary = Cyan,
         secondary = Violet,
@@ -299,13 +309,23 @@ private fun SubSyncHome(videoUri: Uri?, onSelectVideo: () -> Unit, onClosePlayer
                         }
                         Spacer(Modifier.height(10.dp))
                         OutlinedButton(
-                            onClick = { },
+                            onClick = onSelectSubtitle,
                             modifier = Modifier.fillMaxWidth().height(51.dp),
                             shape = RoundedCornerShape(15.dp),
                             border = androidx.compose.foundation.BorderStroke(1.dp, Violet.copy(alpha = 0.55f)),
                             colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
                         ) {
-                            Text("＋   Select Sinhala subtitle (.srt)", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                            Text(
+                                if (subtitleUri == null) "＋   Select Sinhala subtitle (.srt)"
+                                else "✓   " + queryDisplayName(context = LocalContext.current, uri = subtitleUri),
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 13.sp,
+                                maxLines = 1
+                            )
+                        }
+                        if (subtitleUri != null) {
+                            Spacer(Modifier.height(7.dp))
+                            Text("Sinhala subtitle selected. SRT parsing and synchronization are the next processing stage.", color = Cyan, fontSize = 10.sp)
                         }
                     }
                 }
