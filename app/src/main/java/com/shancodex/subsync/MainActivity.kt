@@ -341,10 +341,14 @@ private fun SubSyncPlayerScreen(videoUri: Uri, onBack: () -> Unit) {
         }
     }
     var restored by remember(videoUri) { mutableStateOf(false) }
+    var fallbackPosition by remember(videoUri) { mutableStateOf(0L) }
 
     LaunchedEffect(player, progressKey) {
         val savedPosition = context.playbackStore.data.first()[progressKey] ?: 0L
-        if (savedPosition > 5_000L) player.seekTo(savedPosition)
+        if (savedPosition > 5_000L) {
+            fallbackPosition = savedPosition
+            player.seekTo(savedPosition)
+        }
         restored = true
     }
     LaunchedEffect(player, restored) {
@@ -416,7 +420,7 @@ private fun SubSyncPlayerScreen(videoUri: Uri, onBack: () -> Unit) {
     ) {
         if (isFullscreen) {
             if (useVlcFallback) {
-                VlcFallbackPlayer(videoUri, player.currentPosition, progressKey, Modifier.fillMaxSize(), selectedAspect, true, { isFullscreen = false })
+                VlcFallbackPlayer(videoUri, fallbackPosition, progressKey, Modifier.fillMaxSize(), selectedAspect, true, { isFullscreen = false }, { fallbackPosition = it })
             } else {
                 AndroidView(
                     modifier = Modifier.fillMaxSize(),
@@ -444,7 +448,7 @@ private fun SubSyncPlayerScreen(videoUri: Uri, onBack: () -> Unit) {
                 }
                 Spacer(Modifier.height(12.dp))
                 if (useVlcFallback) {
-                    VlcFallbackPlayer(videoUri, player.currentPosition, progressKey, Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(20.dp)), selectedAspect)
+                    VlcFallbackPlayer(videoUri, fallbackPosition, progressKey, Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(20.dp)), selectedAspect, false, {}, { fallbackPosition = it })
                 } else {
                     AndroidView(
                         modifier = Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(20.dp)),
@@ -496,7 +500,8 @@ private fun VlcFallbackPlayer(
     modifier: Modifier = Modifier,
     aspectMode: String = "Auto",
     fullscreen: Boolean = false,
-    onExitFullscreen: () -> Unit = {}
+    onExitFullscreen: () -> Unit = {},
+    onPositionChanged: (Long) -> Unit = {}
 ) {
     val context = LocalContext.current
     val libVlc = remember { LibVLC(context, arrayListOf("--no-drop-late-frames", "--no-skip-frames", "--avcodec-hw=none")) }
@@ -559,6 +564,7 @@ private fun VlcFallbackPlayer(
     LaunchedEffect(vlcPlayer, ready) {
         while (ready) {
             currentPosition = vlcPlayer.time.coerceAtLeast(0L)
+            onPositionChanged(currentPosition)
             duration = vlcPlayer.length.coerceAtLeast(0L)
             isPlaying = vlcPlayer.isPlaying
             context.playbackStore.edit { prefs ->
@@ -626,12 +632,36 @@ private fun VideoBrowserScreen(onChooseVideo: (Uri) -> Unit, onBack: () -> Unit)
     val context = LocalContext.current
     var videos by remember { mutableStateOf<List<VideoEntry>>(emptyList()) }
     var folder by remember { mutableStateOf<String?>(null) }
+    var sortMode by remember { mutableStateOf("Newest") }
+    var sortMenuExpanded by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { videos = queryVideos(context) }
     val visible = videos.filter { folder == null || it.folder == folder }
+    val sortedVideos = when (sortMode) {
+        "Name A–Z" -> visible.sortedBy { it.name.lowercase() }
+        "Name Z–A" -> visible.sortedByDescending { it.name.lowercase() }
+        "Largest" -> visible.sortedByDescending { it.sizeBytes }
+        "Smallest" -> visible.sortedBy { it.sizeBytes }
+        "Oldest" -> visible.sortedBy { it.dateModified }
+        else -> visible.sortedByDescending { it.dateModified }
+    }
     Column(Modifier.fillMaxSize().background(Color(0xFF080B13)).statusBarsPadding().navigationBarsPadding().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = { if (folder != null) folder = null else onBack() }) { Text("‹ BACK", color = Cyan) }
             Text(if (folder == null) "VIDEO LIBRARY" else folder!!, color = Color.White, fontWeight = FontWeight.Bold)
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("SORT", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.width(8.dp))
+            Box {
+                OutlinedButton(onClick = { sortMenuExpanded = true }) {
+                    Text(sortMode, color = Cyan, fontSize = 11.sp)
+                }
+                DropdownMenu(expanded = sortMenuExpanded, onDismissRequest = { sortMenuExpanded = false }) {
+                    listOf("Newest", "Oldest", "Name A–Z", "Name Z–A", "Largest", "Smallest").forEach { option ->
+                        DropdownMenuItem(text = { Text(option) }, onClick = { sortMode = option; sortMenuExpanded = false })
+                    }
+                }
+            }
         }
         if (folder == null) {
             val folders = videos.map { it.folder }.distinct().sorted()
@@ -641,17 +671,17 @@ private fun VideoBrowserScreen(onChooseVideo: (Uri) -> Unit, onBack: () -> Unit)
                     TextButton(onClick = { folder = name }, modifier = Modifier.fillMaxWidth()) { Text("▣  $name  ·  ${videos.count { it.folder == name }} videos", color = Color.White) }
                 }
                 item { Text("ALL VIDEOS", color = Cyan, fontSize = 10.sp) }
-                items(videos) { video ->
+                items(sortedVideos) { video ->
                     TextButton(onClick = { onChooseVideo(video.uri) }, modifier = Modifier.fillMaxWidth()) {
-                        Column(Modifier.fillMaxWidth()) { Text(video.name, color = Color.White, maxLines = 2); Text(video.folder + " · " + formatTime(video.duration), color = Muted, fontSize = 10.sp) }
+                        Column(Modifier.fillMaxWidth()) { Text(video.name, color = Color.White, maxLines = 2); Text(video.folder + " · " + formatTime(video.duration) + " · " + formatFileSize(video.sizeBytes), color = Muted, fontSize = 10.sp) }
                     }
                 }
             }
         } else {
             LazyColumn {
-                items(visible) { video ->
+                items(sortedVideos) { video ->
                     TextButton(onClick = { onChooseVideo(video.uri) }, modifier = Modifier.fillMaxWidth()) {
-                        Column(Modifier.fillMaxWidth()) { Text(video.name, color = Color.White, maxLines = 2); Text(formatTime(video.duration), color = Muted, fontSize = 10.sp) }
+                        Column(Modifier.fillMaxWidth()) { Text(video.name, color = Color.White, maxLines = 2); Text(formatTime(video.duration) + " · " + formatFileSize(video.sizeBytes), color = Muted, fontSize = 10.sp) }
                     }
                 }
             }
@@ -659,24 +689,28 @@ private fun VideoBrowserScreen(onChooseVideo: (Uri) -> Unit, onBack: () -> Unit)
     }
 }
 
-private data class VideoEntry(val uri: Uri, val name: String, val folder: String, val duration: Long)
+private data class VideoEntry(val uri: Uri, val name: String, val folder: String, val duration: Long, val sizeBytes: Long, val dateModified: Long)
 
 private fun queryVideos(context: Context): List<VideoEntry> {
     val result = mutableListOf<VideoEntry>()
     val collection = MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-    val projection = arrayOf(MediaStore.Video.Media._ID, MediaStore.Video.Media.DISPLAY_NAME, MediaStore.Video.Media.RELATIVE_PATH, MediaStore.Video.Media.DURATION)
+    val projection = arrayOf(MediaStore.Video.Media._ID, MediaStore.Video.Media.DISPLAY_NAME, MediaStore.Video.Media.RELATIVE_PATH, MediaStore.Video.Media.DURATION, MediaStore.Video.Media.SIZE, MediaStore.Video.Media.DATE_MODIFIED)
     context.contentResolver.query(collection, projection, null, null, MediaStore.Video.Media.DATE_ADDED + " DESC")?.use { cursor ->
         val idCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media._ID)
         val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DISPLAY_NAME)
         val pathCol = cursor.getColumnIndex(MediaStore.Video.Media.RELATIVE_PATH)
         val durationCol = cursor.getColumnIndex(MediaStore.Video.Media.DURATION)
+        val sizeCol = cursor.getColumnIndex(MediaStore.Video.Media.SIZE)
+        val modifiedCol = cursor.getColumnIndex(MediaStore.Video.Media.DATE_MODIFIED)
         while (cursor.moveToNext()) {
             val id = cursor.getLong(idCol)
             val name = cursor.getString(nameCol) ?: "Video"
             val path = if (pathCol >= 0) cursor.getString(pathCol).orEmpty() else "Videos/"
             val folderName = path.trimEnd('/').substringAfterLast('/').ifBlank { "Internal storage" }
             val duration = if (durationCol >= 0) cursor.getLong(durationCol) else 0L
-            result.add(VideoEntry(Uri.withAppendedPath(collection, id.toString()), name, folderName, duration))
+            val sizeBytes = if (sizeCol >= 0) cursor.getLong(sizeCol) else 0L
+            val dateModified = if (modifiedCol >= 0) cursor.getLong(modifiedCol) else 0L
+            result.add(VideoEntry(Uri.withAppendedPath(collection, id.toString()), name, folderName, duration, sizeBytes, dateModified))
         }
     }
     return result
@@ -686,6 +720,12 @@ private fun aspectResizeMode(mode: String): Int = when (mode) {
     "Fill" -> androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_ZOOM
     "16:9", "9:16", "4:3" -> androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FILL
     else -> androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
+}
+
+private fun formatFileSize(bytes: Long): String {
+    if (bytes <= 0L) return "Size unknown"
+    val mb = bytes / (1024.0 * 1024.0)
+    return if (mb >= 1024.0) "%.2f GB".format(mb / 1024.0) else "%.0f MB".format(mb)
 }
 
 private fun formatTime(milliseconds: Long): String {
@@ -743,8 +783,10 @@ private fun SyncWaveform(pulse: Float) {
     ) {
         val gap = size.width / (heights.size * 1.7f)
         val barWidth = gap * 0.62f
+        val waveformWidth = gap * (heights.size - 1) + gap * 0.55f
+        val startX = (size.width - waveformWidth) / 2f
         heights.forEachIndexed { index, height ->
-            val x = gap * index + gap * 0.55f
+            val x = startX + gap * index + gap * 0.55f
             val barHeight = height.dp.toPx() * (0.72f + pulse * 0.28f)
             val color = if (index % 2 == 0) Cyan else Violet
             drawLine(
